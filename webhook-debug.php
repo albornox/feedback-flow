@@ -10,5 +10,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     exit;
 }
 
+if ($_SERVER['REQUEST_METHOD'] === 'GET') {
+    if (isset($_GET['hub_challenge'])) {
+        echo $_GET['hub_challenge'];
+        exit;
+    }
+}
+
 echo "Webhook debug ready";
 ?>
