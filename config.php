@@ -5,7 +5,7 @@
 define('DB_HOST', 'localhost');
 define('DB_NAME', 'pryerancpq');
 define('DB_USER', 'pryerancpq');
-define('DB_PASS', 'TU_PASSWORD_AQUI'); // Cambiar por el password real
+define('DB_PASS', '5fMMHr7Kqj'); // Cambiar por el password real
 
 // API Keys
 define('CLAUDE_API_KEY', 'TU_CLAUDE_API_KEY_AQUI'); // De tu cuenta Claude Pro
