@@ -1,19 +1,31 @@
 <?php
 // webhook.php - Endpoint principal para recibir mensajes de WhatsApp
-
 require_once 'config.php';
 require_once 'database.php';
 require_once 'claude.php';
 require_once 'whatsapp.php';
 
-// Verificación del webhook (solo se ejecuta una vez durante setup)
-if ($_GET['hub_mode'] == 'subscribe' && $_GET['hub_verify_token'] == VERIFY_TOKEN) {
-    echo $_GET['hub_challenge'];
-    exit;
+// Verificación del webhook (solo GET requests)
+if ($_SERVER['REQUEST_METHOD'] === 'GET') {
+    $hub_mode = $_GET['hub_mode'] ?? '';
+    $hub_verify_token = $_GET['hub_verify_token'] ?? '';
+    $hub_challenge = $_GET['hub_challenge'] ?? '';
+    
+    // Token que configuraste en Meta (cámbialo si es necesario)
+    $verify_token = 'test123';
+    
+    if ($hub_mode === 'subscribe' && $hub_verify_token === $verify_token) {
+        echo $hub_challenge;
+        exit;
+    } else {
+        http_response_code(403);
+        echo 'Forbidden';
+        exit;
+    }
 }
 
-// Procesar mensajes entrantes
-if ($_SERVER['REQUEST_METHOD'] == 'POST') {
+// Procesar mensajes entrantes (POST requests)
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $input = file_get_contents('php://input');
     $data = json_decode($input, true);
     
@@ -43,8 +55,10 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST') {
         http_response_code(200);
         echo "OK";
     }
-} else {
-    http_response_code(405);
-    echo "Method not allowed";
+    exit;
 }
+
+// Otros métodos no permitidos
+http_response_code(405);
+echo "Method not allowed";
 ?>
