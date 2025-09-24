@@ -1,0 +1,22 @@
+# Variables de entorno (contienen información sensible)
+.env
+.env.local
+.env.production
+
+# Logs
+*.log
+logs/
+
+# Temporales
+tmp/
+temp/
+
+# IDE
+.vscode/
+.idea/
+
+# MacOS
+.DS_Store
+
+# Windows
+Thumbs.db
