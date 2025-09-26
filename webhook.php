@@ -1,5 +1,5 @@
 <?php
-// webhook.php - Versión corregida que funciona con tus archivos
+// webhook.php - Versión final que evita el error de last_message
 error_reporting(E_ALL);
 ini_set('display_errors', 0);
 
@@ -9,9 +9,8 @@ function logActivity($message) {
     file_put_contents('webhook_logs.txt', "[$timestamp] $message\n", FILE_APPEND);
 }
 
-// Cargar configuración manualmente para evitar errores
+// Cargar variables de entorno
 try {
-    // Cargar variables de entorno directamente
     if (file_exists('.env')) {
         $lines = file('.env', FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
         foreach ($lines as $line) {
@@ -98,8 +97,8 @@ function processIncomingMessage($message) {
             $phone = '+' . $phone;
         }
         
-        // Guardar en base de datos
-        $conversationId = saveConversationSimple($phone, $messageText);
+        // Guardar en base de datos usando estructura verificada
+        $conversationId = saveConversationFixed($phone, $messageText);
         
         if ($conversationId) {
             logActivity("Message saved with ID: $conversationId");
@@ -108,6 +107,9 @@ function processIncomingMessage($message) {
             $response = generateSimpleResponse($messageText);
             if (sendWhatsAppMessageSimple($phone, $response)) {
                 logActivity("Response sent: " . substr($response, 0, 50) . "...");
+                
+                // Guardar respuesta también
+                saveMessageOnly($conversationId, $response, 'sent');
             }
         }
         
@@ -116,9 +118,9 @@ function processIncomingMessage($message) {
     }
 }
 
-function saveConversationSimple($phone, $message) {
+function saveConversationFixed($phone, $message) {
     try {
-        // Conexión directa a base de datos
+        // Conexión directa
         $pdo = new PDO(
             "mysql:host=localhost;dbname=pryerancpq;charset=utf8mb4",
             "pryerancpq",
@@ -126,15 +128,35 @@ function saveConversationSimple($phone, $message) {
         );
         $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
         
-        // Insertar o actualizar conversación
-        $stmt = $pdo->prepare("
-            INSERT INTO conversations (phone_number, last_message, status, created_at, updated_at) 
-            VALUES (?, ?, 'active', NOW(), NOW())
-            ON DUPLICATE KEY UPDATE 
-            last_message = VALUES(last_message), 
-            updated_at = NOW()
-        ");
-        $stmt->execute([$phone, $message]);
+        // Verificar qué columnas existen realmente
+        $stmt = $pdo->query("DESCRIBE conversations");
+        $columns = $stmt->fetchAll(PDO::FETCH_COLUMN);
+        
+        logActivity("Available columns: " . implode(', ', $columns));
+        
+        // Construir query dinámicamente basado en columnas disponibles
+        if (in_array('last_message', $columns)) {
+            // Usar estructura completa
+            $stmt = $pdo->prepare("
+                INSERT INTO conversations (phone_number, last_message, status, created_at, updated_at) 
+                VALUES (?, ?, 'active', NOW(), NOW())
+                ON DUPLICATE KEY UPDATE 
+                last_message = VALUES(last_message), 
+                updated_at = NOW()
+            ");
+            $stmt->execute([$phone, $message]);
+            logActivity("Using full structure with last_message");
+        } else {
+            // Usar estructura básica
+            $stmt = $pdo->prepare("
+                INSERT INTO conversations (phone_number, customer_name, created_at) 
+                VALUES (?, ?, NOW())
+                ON DUPLICATE KEY UPDATE 
+                customer_name = VALUES(customer_name)
+            ");
+            $stmt->execute([$phone, 'WhatsApp User']);
+            logActivity("Using basic structure without last_message");
+        }
         
         // Obtener ID
         $stmt = $pdo->prepare("SELECT id FROM conversations WHERE phone_number = ?");
@@ -142,14 +164,12 @@ function saveConversationSimple($phone, $message) {
         $result = $stmt->fetch();
         
         if ($result) {
-            // Guardar mensaje individual
-            $stmt = $pdo->prepare("
-                INSERT INTO messages (conversation_id, message, direction, created_at) 
-                VALUES (?, ?, 'received', NOW())
-            ");
-            $stmt->execute([$result['id'], $message]);
+            $conversationId = $result['id'];
             
-            return $result['id'];
+            // Guardar mensaje en tabla messages
+            saveMessageOnly($conversationId, $message, 'received');
+            
+            return $conversationId;
         }
         
         return false;
@@ -160,26 +180,46 @@ function saveConversationSimple($phone, $message) {
     }
 }
 
+function saveMessageOnly($conversationId, $message, $direction) {
+    try {
+        $pdo = new PDO(
+            "mysql:host=localhost;dbname=pryerancpq;charset=utf8mb4",
+            "pryerancpq",
+            $_ENV['DB_PASSWORD'] ?? 'CGq6TvgUU3'
+        );
+        $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+        
+        $stmt = $pdo->prepare("
+            INSERT INTO messages (conversation_id, message, direction, created_at) 
+            VALUES (?, ?, ?, NOW())
+        ");
+        $stmt->execute([$conversationId, $message, $direction]);
+        
+        logActivity("Message saved in messages table: $direction");
+        return true;
+        
+    } catch (Exception $e) {
+        logActivity("Error saving message: " . $e->getMessage());
+        return false;
+    }
+}
+
 function generateSimpleResponse($message) {
     $message = strtolower(trim($message));
     
-    // Respuestas básicas del flujo
-    if (preg_match('/\d+/', $message)) {
-        // Si contiene números (posible número de factura)
-        return "¡Perfecto! Gracias por el número de factura. Ahora me gustaría saber: ¿cómo te enteraste de Nia Bakery?\n\nA) Google/búsqueda en internet\nB) Instagram o redes sociales\nC) Un amigo te recomendó\nD) Pasabas por la zona";
+    // Respuestas dinámicas
+    if (strpos($message, 'prueba') !== false) {
+        return "¡Hola! Veo que estás probando el sistema. Todo está funcionando correctamente. ¿Podrías enviarme el número de tu factura para continuar?";
+    } elseif (preg_match('/\d+/', $message)) {
+        return "¡Perfecto! Gracias por el número de factura. ¿Cómo te enteraste de Nia Bakery?\n\nA) Google\nB) Instagram\nC) Un amigo\nD) Pasabas por la zona";
     } elseif (strpos($message, 'a') !== false || strpos($message, 'google') !== false) {
-        return "Genial, gracias por el dato. Del 1 al 5, ¿qué tal estuvo todo hoy en Nia Bakery?\n\n1️⃣ = Muy malo\n2️⃣ = Malo\n3️⃣ = Regular\n4️⃣ = Bueno\n5️⃣ = Excelente";
-    } elseif (strpos($message, 'b') !== false || strpos($message, 'instagram') !== false) {
-        return "Súper, Instagram es importante para nosotros. Del 1 al 5, ¿qué tal estuvo todo hoy?\n\n1️⃣ = Muy malo\n2️⃣ = Malo\n3️⃣ = Regular\n4️⃣ = Bueno\n5️⃣ = Excelente";
+        return "Genial. Del 1 al 5, ¿qué tal estuvo todo hoy?\n\n1️⃣ = Muy malo\n2️⃣ = Malo\n3️⃣ = Regular\n4️⃣ = Bueno\n5️⃣ = Excelente";
     } elseif (preg_match('/[4-5]/', $message)) {
-        // Rating positivo
-        return "¡Qué alegría saber que la pasaste súper bien! 🎉\n\n¿Nos ayudarías con una reseña rápida en Google? Como agradecimiento: tienes 10% de descuento en tu próxima visita 🎁";
+        return "¡Qué alegría! 🎉 ¿Nos ayudarías con una reseña en Google? Como agradecimiento: 10% de descuento en tu próxima visita 🎁";
     } elseif (preg_match('/[1-3]/', $message)) {
-        // Rating negativo
-        return "Lamento mucho que no haya sido una buena experiencia 😔\n\n¿Podrías contarme qué pasó para poder mejorar? Pierre (el dueño) va a querer saber de esto personalmente.";
+        return "Lamento mucho eso 😔 ¿Podrías contarme qué pasó? Pierre (el dueño) quiere saber para mejorar.";
     } else {
-        // Mensaje inicial
-        return "¡Hola! 👋\n\nSoy Ana, la asistente digital de Nia Bakery. ¿Podrías ayudarme con 2 minutitos para mejorar tu experiencia?\n\nPara comenzar, ¿podrías enviarme el número de factura que está resaltado en tu cuenta?";
+        return "¡Hola! 👋 Soy Ana de Nia Bakery. ¿Podrías ayudarme con 2 minutitos para mejorar tu experiencia? Envíame el número de factura que está resaltado en tu cuenta.";
     }
 }
 
@@ -211,8 +251,7 @@ function sendWhatsAppMessageSimple($phone, $message) {
         $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
         curl_close($ch);
         
-        logActivity("WhatsApp API response: HTTP $httpCode - " . substr($response, 0, 100) . "...");
-        
+        logActivity("WhatsApp API: HTTP $httpCode");
         return $httpCode === 200;
         
     } catch (Exception $e) {
