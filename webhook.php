@@ -1,7 +1,10 @@
 <?php
-// webhook.php - Versión final que evita el error de last_message
+// webhook.php - Versión mejorada y segura
 error_reporting(E_ALL);
 ini_set('display_errors', 0);
+
+require_once 'config.php';
+require_once 'database.php';
 
 // Log function
 function logActivity($message) {
@@ -9,32 +12,15 @@ function logActivity($message) {
     file_put_contents('webhook_logs.txt', "[$timestamp] $message\n", FILE_APPEND);
 }
 
-// Cargar variables de entorno
-try {
-    if (file_exists('.env')) {
-        $lines = file('.env', FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
-        foreach ($lines as $line) {
-            if (strpos(trim($line), '#') === 0) continue;
-            if (strpos($line, '=') !== false) {
-                list($name, $value) = explode('=', $line, 2);
-                $_ENV[trim($name)] = trim($value);
-            }
-        }
-    }
-} catch (Exception $e) {
-    logActivity("Error loading .env: " . $e->getMessage());
-}
-
 // Verificación GET (para Meta)
 if ($_SERVER['REQUEST_METHOD'] === 'GET') {
-    $expected_token = $_ENV['WEBHOOK_VERIFY_TOKEN'] ?? 'feedback_flow_2025';
     $mode = $_GET['hub_mode'] ?? '';
     $token = $_GET['hub_verify_token'] ?? '';
     $challenge = $_GET['hub_challenge'] ?? '';
     
     logActivity("GET verification - Mode: $mode, Token: $token");
     
-    if ($mode === 'subscribe' && $token === $expected_token) {
+    if ($mode === 'subscribe' && $token === WHATSAPP_WEBHOOK_VERIFY_TOKEN) {
         logActivity("Webhook verification successful");
         echo $challenge;
         exit;
@@ -49,7 +35,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET') {
 // POST para mensajes entrantes
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $input = file_get_contents('php://input');
-    
     logActivity("POST received: " . substr($input, 0, 200) . "...");
     
     try {
@@ -61,13 +46,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             exit;
         }
         
+        // Inicializar base de datos
+        $db = new Database();
+        
         // Procesar mensajes
         foreach ($data['entry'] as $entry) {
             if (isset($entry['changes'])) {
                 foreach ($entry['changes'] as $change) {
                     if (isset($change['value']['messages'])) {
                         foreach ($change['value']['messages'] as $message) {
-                            processIncomingMessage($message);
+                            processIncomingMessage($message, $db);
                         }
                     }
                 }
@@ -84,7 +72,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     exit;
 }
 
-function processIncomingMessage($message) {
+function processIncomingMessage($message, $db) {
     try {
         $phone = $message['from'] ?? '';
         $messageText = $message['text']['body'] ?? '';
@@ -97,19 +85,21 @@ function processIncomingMessage($message) {
             $phone = '+' . $phone;
         }
         
-        // Guardar en base de datos usando estructura verificada
-        $conversationId = saveConversationFixed($phone, $messageText);
+        // Guardar conversación usando el método corregido
+        $conversationId = $db->saveOrUpdateConversation($phone, $messageText);
         
         if ($conversationId) {
-            logActivity("Message saved with ID: $conversationId");
+            // Guardar mensaje recibido
+            $db->saveMessage($conversationId, $messageText, 'received');
+            
+            logActivity("Message saved with conversation ID: $conversationId");
             
             // Generar y enviar respuesta
-            $response = generateSimpleResponse($messageText);
-            if (sendWhatsAppMessageSimple($phone, $response)) {
-                logActivity("Response sent: " . substr($response, 0, 50) . "...");
-                
-                // Guardar respuesta también
-                saveMessageOnly($conversationId, $response, 'sent');
+            $response = generateSmartResponse($messageText, $phone, $db);
+            if (sendWhatsAppMessage($phone, $response)) {
+                // Guardar respuesta enviada
+                $db->saveMessage($conversationId, $response, 'sent');
+                logActivity("Response sent and saved: " . substr($response, 0, 50) . "...");
             }
         }
         
@@ -118,117 +108,43 @@ function processIncomingMessage($message) {
     }
 }
 
-function saveConversationFixed($phone, $message) {
-    try {
-        // Conexión directa
-        $pdo = new PDO(
-            "mysql:host=localhost;dbname=pryerancpq;charset=utf8mb4",
-            "pryerancpq",
-            $_ENV['DB_PASSWORD'] ?? 'CGq6TvgUU3'
-        );
-        $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
-        
-        // Verificar qué columnas existen realmente
-        $stmt = $pdo->query("DESCRIBE conversations");
-        $columns = $stmt->fetchAll(PDO::FETCH_COLUMN);
-        
-        logActivity("Available columns: " . implode(', ', $columns));
-        
-        // Construir query dinámicamente basado en columnas disponibles
-        if (in_array('last_message', $columns)) {
-            // Usar estructura completa
-            $stmt = $pdo->prepare("
-                INSERT INTO conversations (phone_number, last_message, status, created_at, updated_at) 
-                VALUES (?, ?, 'active', NOW(), NOW())
-                ON DUPLICATE KEY UPDATE 
-                last_message = VALUES(last_message), 
-                updated_at = NOW()
-            ");
-            $stmt->execute([$phone, $message]);
-            logActivity("Using full structure with last_message");
-        } else {
-            // Usar estructura básica
-            $stmt = $pdo->prepare("
-                INSERT INTO conversations (phone_number, customer_name, created_at) 
-                VALUES (?, ?, NOW())
-                ON DUPLICATE KEY UPDATE 
-                customer_name = VALUES(customer_name)
-            ");
-            $stmt->execute([$phone, 'WhatsApp User']);
-            logActivity("Using basic structure without last_message");
-        }
-        
-        // Obtener ID
-        $stmt = $pdo->prepare("SELECT id FROM conversations WHERE phone_number = ?");
-        $stmt->execute([$phone]);
-        $result = $stmt->fetch();
-        
-        if ($result) {
-            $conversationId = $result['id'];
-            
-            // Guardar mensaje en tabla messages
-            saveMessageOnly($conversationId, $message, 'received');
-            
-            return $conversationId;
-        }
-        
-        return false;
-        
-    } catch (Exception $e) {
-        logActivity("Database error: " . $e->getMessage());
-        return false;
-    }
-}
-
-function saveMessageOnly($conversationId, $message, $direction) {
-    try {
-        $pdo = new PDO(
-            "mysql:host=localhost;dbname=pryerancpq;charset=utf8mb4",
-            "pryerancpq",
-            $_ENV['DB_PASSWORD'] ?? 'CGq6TvgUU3'
-        );
-        $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
-        
-        $stmt = $pdo->prepare("
-            INSERT INTO messages (conversation_id, message, direction, created_at) 
-            VALUES (?, ?, ?, NOW())
-        ");
-        $stmt->execute([$conversationId, $message, $direction]);
-        
-        logActivity("Message saved in messages table: $direction");
-        return true;
-        
-    } catch (Exception $e) {
-        logActivity("Error saving message: " . $e->getMessage());
-        return false;
-    }
-}
-
-function generateSimpleResponse($message) {
+function generateSmartResponse($message, $phone, $db) {
     $message = strtolower(trim($message));
     
-    // Respuestas dinámicas
-    if (strpos($message, 'prueba') !== false) {
-        return "¡Hola! Veo que estás probando el sistema. Todo está funcionando correctamente. ¿Podrías enviarme el número de tu factura para continuar?";
-    } elseif (preg_match('/\d+/', $message)) {
-        return "¡Perfecto! Gracias por el número de factura. ¿Cómo te enteraste de Nia Bakery?\n\nA) Google\nB) Instagram\nC) Un amigo\nD) Pasabas por la zona";
-    } elseif (strpos($message, 'a') !== false || strpos($message, 'google') !== false) {
-        return "Genial. Del 1 al 5, ¿qué tal estuvo todo hoy?\n\n1️⃣ = Muy malo\n2️⃣ = Malo\n3️⃣ = Regular\n4️⃣ = Bueno\n5️⃣ = Excelente";
-    } elseif (preg_match('/[4-5]/', $message)) {
-        return "¡Qué alegría! 🎉 ¿Nos ayudarías con una reseña en Google? Como agradecimiento: 10% de descuento en tu próxima visita 🎁";
-    } elseif (preg_match('/[1-3]/', $message)) {
-        return "Lamento mucho eso 😔 ¿Podrías contarme qué pasó? Pierre (el dueño) quiere saber para mejorar.";
-    } else {
-        return "¡Hola! 👋 Soy Ana de Nia Bakery. ¿Podrías ayudarme con 2 minutitos para mejorar tu experiencia? Envíame el número de factura que está resaltado en tu cuenta.";
+    // Obtener historial de conversación para respuestas contextuales
+    $conversation = $db->getConversationByPhone($phone);
+    $messages = $conversation ? $db->getMessages($conversation['id'], 5) : [];
+    
+    // Lógica de respuestas mejorada
+    if (strpos($message, 'hola') !== false || strpos($message, 'hi') !== false) {
+        return "¡Hola! 👋 Soy Ana de " . RESTAURANT_NAME . ". ¿Podrías ayudarme con 2 minutitos para mejorar tu experiencia? Envíame el número de factura que está resaltado en tu cuenta.";
+    } 
+    
+    if (preg_match('/\d{3,}/', $message)) {
+        return "¡Perfecto! Gracias por el número de factura. 🙏\n\n¿Cómo te enteraste de " . RESTAURANT_NAME . "?\n\nA) Google/búsqueda en internet\nB) Instagram o redes sociales\nC) Un amigo te recomendó\nD) Pasabas por la zona\nE) Otro (¿cuál?)";
     }
+    
+    if (preg_match('/[abcde]/i', $message) || strpos($message, 'google') !== false || strpos($message, 'instagram') !== false) {
+        return "Súper, gracias por el dato 📊\n\nÚltima pregunta rápida: Del 1 al 5, ¿qué tal estuvo todo hoy en " . RESTAURANT_NAME . "?\n\n1️⃣ = Muy malo 😞\n2️⃣ = Malo 😕\n3️⃣ = Regular 😐\n4️⃣ = Bueno 😊\n5️⃣ = Excelente 😍";
+    }
+    
+    if (preg_match('/[4-5]/', $message)) {
+        return "¡Qué alegría saber que la pasaste súper bien! 🎉\n\n¿Nos ayudarías con una reseña rápida en Google? Te toma 30 segundos:\n\n" . GOOGLE_REVIEWS_URL . "\n\nComo agradecimiento: tienes 10% de descuento en tu próxima visita 🎁\n\n¿Te parece?";
+    }
+    
+    if (preg_match('/[1-3]/', $message)) {
+        // Enviar alerta al gerente
+        sendManagerAlert($phone, $message);
+        return "Oh no... lamento mucho que no haya sido una buena experiencia 😔\n\nMe interesa muchísimo saber qué pasó para poder mejorar. ¿Podrías contarme qué salió mal?\n\nPierre (el dueño) va a querer saber de esto para solucionarlo personalmente.";
+    }
+    
+    // Respuesta por defecto
+    return "Gracias por tu mensaje. Un miembro de nuestro equipo te responderá pronto. 😊\n\nSi quieres dejar feedback sobre tu visita, puedes enviarme el número de tu factura.";
 }
 
-function sendWhatsAppMessageSimple($phone, $message) {
+function sendWhatsAppMessage($phone, $message) {
     try {
-        $phoneNumberId = $_ENV['WHATSAPP_PHONE_NUMBER_ID'] ?? "84931711825594";
-        $accessToken = $_ENV['WHATSAPP_ACCESS_TOKEN'] ?? "EAAJzCXQp00sBPjcl3Qm5XJUxofxVYwfZBvNiZCJTosiT1ZBlTH7Jc5tlyX3Kxr87znswTZBQL";
-        
-        $url = "https://graph.facebook.com/v18.0/$phoneNumberId/messages";
+        $url = "https://graph.facebook.com/v18.0/" . WHATSAPP_PHONE_NUMBER_ID . "/messages";
         
         $data = [
             'messaging_product' => 'whatsapp',
@@ -242,16 +158,17 @@ function sendWhatsAppMessageSimple($phone, $message) {
         curl_setopt($ch, CURLOPT_POST, true);
         curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($data));
         curl_setopt($ch, CURLOPT_HTTPHEADER, [
-            "Authorization: Bearer $accessToken",
+            "Authorization: Bearer " . WHATSAPP_ACCESS_TOKEN,
             "Content-Type: application/json"
         ]);
         curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, true);
         
         $response = curl_exec($ch);
         $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
         curl_close($ch);
         
-        logActivity("WhatsApp API: HTTP $httpCode");
+        logActivity("WhatsApp API Response: HTTP $httpCode");
         return $httpCode === 200;
         
     } catch (Exception $e) {
@@ -260,7 +177,20 @@ function sendWhatsAppMessageSimple($phone, $message) {
     }
 }
 
-// Respuesta por defecto
+function sendManagerAlert($phone, $complaint) {
+    // Log crítico para el gerente
+    $alert = "🚨 FEEDBACK NEGATIVO RECIBIDO 🚨\n";
+    $alert .= "Teléfono: $phone\n";
+    $alert .= "Mensaje: $complaint\n";
+    $alert .= "Hora: " . date('Y-m-d H:i:s') . "\n";
+    
+    logActivity("MANAGER_ALERT: $alert");
+    
+    // Aquí podrías enviar email, SMS o notificación push al gerente
+    // sendEmail(MANAGER_EMAIL, "Feedback Negativo - " . RESTAURANT_NAME, $alert);
+}
+
+// Respuesta por defecto para métodos no permitidos
 http_response_code(405);
 echo "Method not allowed";
 ?>
