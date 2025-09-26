@@ -1,5 +1,6 @@
 <?php
-// database.php - Clase para manejar operaciones de base de datos
+// database.php - Clase corregida para manejar operaciones de base de datos
+
 class Database {
     private $pdo;
     
@@ -16,121 +17,121 @@ class Database {
         }
     }
     
+    // ✅ CORREGIDO: Método que funciona con la estructura real
     public function getAllConversations($limit = 100) {
         try {
-            $stmt = $this->pdo->prepare("SELECT id, phone_number, customer_name, restaurant, receipt_number, source, rating, comment, action_taken, created_at, updated_at, last_message, status FROM conversations ORDER BY created_at DESC LIMIT ?");
+            $stmt = $this->pdo->prepare("
+                SELECT 
+                    c.id,
+                    c.phone_number,
+                    c.customer_name,
+                    c.last_message,
+                    c.status,
+                    c.created_at,
+                    c.updated_at,
+                    '' as receipt_number,
+                    '' as source,
+                    NULL as rating,
+                    '' as comment,
+                    '' as action_taken
+                FROM conversations c 
+                ORDER BY c.updated_at DESC 
+                LIMIT ?
+            ");
             $stmt->execute([$limit]);
             return $stmt->fetchAll(PDO::FETCH_ASSOC);
         } catch (PDOException $e) {
-            logMessage("Error obteniendo conversaciones: " . $e->getMessage(), 'ERROR');
+            error_log("Error obteniendo conversaciones: " . $e->getMessage());
             return [];
         }
     }
     
-    public function getConversation($id) {
+    // ✅ NUEVO: Obtener conversación por teléfono
+    public function getConversationByPhone($phone) {
         try {
-            $stmt = $this->pdo->prepare("SELECT * FROM conversations WHERE id = ?");
-            $stmt->execute([$id]);
+            $stmt = $this->pdo->prepare("SELECT * FROM conversations WHERE phone_number = ?");
+            $stmt->execute([$phone]);
             return $stmt->fetch(PDO::FETCH_ASSOC);
         } catch (PDOException $e) {
-            logMessage("Error obteniendo conversación: " . $e->getMessage(), 'ERROR');
+            error_log("Error obteniendo conversación: " . $e->getMessage());
             return null;
         }
     }
     
-    public function saveConversation($data) {
+    // ✅ CORREGIDO: Crear/actualizar conversación correctamente
+    public function saveOrUpdateConversation($phone, $message) {
         try {
-            $stmt = $this->pdo->prepare("
-                INSERT INTO conversations 
-                (phone_number, customer_name, restaurant, receipt_number, source, rating, comment, action_taken, created_at) 
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW())
-            ");
+            // Verificar si existe
+            $existing = $this->getConversationByPhone($phone);
             
-            return $stmt->execute([
-                $data['phone_number'],
-                $data['customer_name'] ?? null,
-                $data['restaurant'] ?? RESTAURANT_NAME,
-                $data['receipt_number'] ?? null,
-                $data['source'] ?? null,
-                $data['rating'] ?? null,
-                $data['comment'] ?? null,
-                $data['action_taken'] ?? null
-            ]);
-        } catch (PDOException $e) {
-            logMessage("Error guardando conversación: " . $e->getMessage(), 'ERROR');
-            return false;
-        }
-    }
-    
-    public function updateConversation($id, $data) {
-        try {
-            $stmt = $this->pdo->prepare("
-                UPDATE conversations 
-                SET customer_name = ?, receipt_number = ?, source = ?, rating = ?, comment = ?, action_taken = ?, updated_at = NOW()
-                WHERE id = ?
-            ");
-            
-            return $stmt->execute([
-                $data['customer_name'] ?? null,
-                $data['receipt_number'] ?? null,
-                $data['source'] ?? null,
-                $data['rating'] ?? null,
-                $data['comment'] ?? null,
-                $data['action_taken'] ?? null,
-                $id
-            ]);
-        } catch (PDOException $e) {
-            logMessage("Error actualizando conversación: " . $e->getMessage(), 'ERROR');
-            return false;
-        }
-    }
-    
-    public function getUserSession($phone_number) {
-        try {
-            $stmt = $this->pdo->prepare("SELECT * FROM user_sessions WHERE phone_number = ?");
-            $stmt->execute([$phone_number]);
-            $result = $stmt->fetch(PDO::FETCH_ASSOC);
-            
-            if ($result && $result['session_data']) {
-                $result['session_data'] = json_decode($result['session_data'], true);
+            if ($existing) {
+                // Actualizar existente
+                $stmt = $this->pdo->prepare("
+                    UPDATE conversations 
+                    SET last_message = ?, updated_at = NOW() 
+                    WHERE phone_number = ?
+                ");
+                $stmt->execute([$message, $phone]);
+                return $existing['id'];
+            } else {
+                // Crear nueva
+                $stmt = $this->pdo->prepare("
+                    INSERT INTO conversations (phone_number, customer_name, last_message, status, created_at, updated_at) 
+                    VALUES (?, ?, ?, 'active', NOW(), NOW())
+                ");
+                $stmt->execute([$phone, 'WhatsApp User', $message]);
+                return $this->pdo->lastInsertId();
             }
-            
-            return $result;
         } catch (PDOException $e) {
-            logMessage("Error obteniendo sesión: " . $e->getMessage(), 'ERROR');
-            return null;
+            error_log("Error guardando conversación: " . $e->getMessage());
+            return false;
         }
     }
     
-    public function saveUserSession($phone_number, $step, $data) {
+    // ✅ NUEVO: Guardar mensaje en tabla messages
+    public function saveMessage($conversationId, $message, $direction = 'received') {
         try {
             $stmt = $this->pdo->prepare("
-                INSERT INTO user_sessions (phone_number, current_step, session_data, updated_at) 
+                INSERT INTO messages (conversation_id, message, direction, created_at) 
                 VALUES (?, ?, ?, NOW())
-                ON DUPLICATE KEY UPDATE 
-                current_step = VALUES(current_step), 
-                session_data = VALUES(session_data), 
-                updated_at = VALUES(updated_at)
             ");
-            
-            return $stmt->execute([
-                $phone_number,
-                $step,
-                json_encode($data)
-            ]);
+            return $stmt->execute([$conversationId, $message, $direction]);
         } catch (PDOException $e) {
-            logMessage("Error guardando sesión: " . $e->getMessage(), 'ERROR');
+            error_log("Error guardando mensaje: " . $e->getMessage());
             return false;
         }
     }
     
-    public function deleteUserSession($phone_number) {
+    // ✅ NUEVO: Obtener mensajes de una conversación
+    public function getMessages($conversationId, $limit = 50) {
         try {
-            $stmt = $this->pdo->prepare("DELETE FROM user_sessions WHERE phone_number = ?");
-            return $stmt->execute([$phone_number]);
+            $stmt = $this->pdo->prepare("
+                SELECT * FROM messages 
+                WHERE conversation_id = ? 
+                ORDER BY created_at DESC 
+                LIMIT ?
+            ");
+            $stmt->execute([$conversationId, $limit]);
+            return $stmt->fetchAll(PDO::FETCH_ASSOC);
         } catch (PDOException $e) {
-            logMessage("Error eliminando sesión: " . $e->getMessage(), 'ERROR');
-            return false;
+            error_log("Error obteniendo mensajes: " . $e->getMessage());
+            return [];
+        }
+    }
+    
+    // ✅ NUEVO: Estadísticas básicas
+    public function getStats() {
+        try {
+            $stmt = $this->pdo->query("SELECT COUNT(*) as total FROM conversations");
+            $total = $stmt->fetch()['total'];
+            
+            $stmt = $this->pdo->query("SELECT COUNT(*) as today FROM conversations WHERE DATE(created_at) = CURDATE()");
+            $today = $stmt->fetch()['today'];
+            
+            return ['total' => $total, 'today' => $today];
+        } catch (PDOException $e) {
+            error_log("Error obteniendo estadísticas: " . $e->getMessage());
+            return ['total' => 0, 'today' => 0];
         }
     }
 }
