@@ -18,7 +18,7 @@ class Database {
     
     public function getAllConversations($limit = 100) {
         try {
-            $stmt = $this->pdo->prepare("SELECT * FROM conversations ORDER BY created_at DESC LIMIT ?");
+            $stmt = $this->pdo->prepare("SELECT id, phone_number, customer_name, restaurant, receipt_number, source, rating, comment, action_taken, created_at, updated_at, last_message, status FROM conversations ORDER BY created_at DESC LIMIT ?");
             $stmt->execute([$limit]);
             return $stmt->fetchAll(PDO::FETCH_ASSOC);
         } catch (PDOException $e) {
